@@ -1,0 +1,21 @@
+sources:
+  - name: as-{ASN}-native
+    hosts:
+      - url: ssh://root@{IP}
+  - name: as-{ASN}-debug
+    hosts:
+      - url: ssh://root@{IP}
+
+devices:
+  - name: ignore-known
+    ignore-known-hosts: True
+
+auths:
+  - name: as-{ASN}-key
+    keyfile: ./keys/{ASN}/id_rsa
+
+namespaces:
+  - name: as-{ASN}
+    source: as-{ASN}-debug
+    auth: as-{ASN}-key
+    device: ignore-known
