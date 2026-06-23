@@ -28,3 +28,7 @@
 ### Scrape Interval History
 - Original: 15 seconds — caused periodic memory spikes up to 1.2GB
 - Current: 60 seconds — stable, no spikes observed
+
+### Prometheus Query Download Time
+- Time to download query results: 7ms
+- Well under the 60 second scrape interval
