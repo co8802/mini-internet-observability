@@ -1,3 +1,5 @@
+set shell := ["bash", "-c"]
+
 # Install all dependencies
 install:
     curl -LsSf https://astral.sh/uv/install.sh | sh
