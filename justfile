@@ -21,8 +21,9 @@ pull-keys:
 start:
     sudo sysctl fs.inotify.max_user_instances=8192
     sudo sysctl fs.inotify.max_user_watches=524288
-    sudo docker run -d --name cadvisor --volume /:/rootfs:ro --volume /var/run:/var/run:rw --volume /var/run/docker.sock:/var/run/docker.sock:rw --volume /sys:/sys:ro --volume /var/lib/docker/:/var/lib/docker:ro --publish 8080:8080 gcr.io/cadvisor/cadvisor:latest
-    sudo docker run -d --name prometheus --publish 9090:9090 --volume ~/mini-internet-observability/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
+    sudo chmod 666 /var/run/docker.sock
+    sudo docker run -d --name otel-collector --volume /var/run/docker.sock:/var/run/docker.sock --volume ~/mini-internet-observability/otel-config.yml:/etc/otel-config.yml --publish 8889:8889 otel/opentelemetry-collector-contrib:latest --config /etc/otel-config.yml
+    sudo docker run -d --name prometheus --publish 9090:9090 --volume ~/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
     sudo docker run -d --name grafana --publish 3000:3000 grafana/grafana
     sudo screen -dmS monitor python3 ~/mini-internet-observability/monitor.py
     echo "Monitoring stack started"
@@ -33,11 +34,11 @@ collect AS:
 
 # Check status of monitoring stack
 status:
-    sudo docker ps | grep -E "cadvisor|prometheus|grafana"
+    sudo docker ps | grep -E "otel|prometheus|grafana"
     sudo screen -list
 
 # Stop the monitoring stack
 stop:
-    sudo docker stop cadvisor prometheus grafana
-    sudo docker rm cadvisor prometheus grafana
+    sudo docker stop otel-collector prometheus grafana
+    sudo docker rm otel-collector prometheus grafana
     sudo screen -X -S monitor quit
