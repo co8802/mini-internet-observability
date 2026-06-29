@@ -47,3 +47,20 @@
 Switch from cAdvisor to OpenTelemetry. OpenTelemetry uses a push model where each container sends its own metrics rather than one process polling everything. Overhead stays flat as containers scale. This is the right architecture for a 1192 container topology.
 
 A quick win before that switch: adjust cAdvisor's housekeeping interval from the default 1 second to 30 seconds using the --housekeeping_interval flag. This would reduce cAdvisor CPU by roughly 30x with no impact on data quality since Prometheus only scrapes every 60 seconds anyway.
+
+## OpenTelemetry vs cAdvisor Comparison
+
+Both profiled over 90 minutes at 178 containers.
+
+| Metric | cAdvisor | OpenTelemetry | Improvement |
+|--------|----------|---------------|-------------|
+| CPU Average | 19.30% | 0.11% | 175x less |
+| CPU Max | 96.52% | 3.55% | 27x less |
+| Memory Average | 225MB | 61MB | 4x less |
+| Memory Max | 285MB | 64MB | 4x less |
+
+## Decision
+Switched from cAdvisor to OpenTelemetry. cAdvisor removed.
+
+### Limitations
+OpenTelemetry cannot collect network stats from mini-internet containers that use Open vSwitch — "Link not found" errors for OVS network namespaces. CPU and memory collection works perfectly for all 178 containers.
