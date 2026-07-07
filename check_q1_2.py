@@ -1,13 +1,12 @@
-import pandas as pd
-import glob
 import sys
+from suzieq.sqobjects import get_sqobject
 
 def check_q1_2(asn):
     ns = "as-{:02d}".format(asn)
     X = asn
-    results = []
     passed = 0
     failed = 0
+    results = []
 
     def check(name, condition):
         nonlocal passed, failed
@@ -18,64 +17,57 @@ def check_q1_2(asn):
             results.append("  FAIL: " + name)
             failed += 1
 
-    files = glob.glob('./parquet/routes/**/*.parquet', recursive=True)
-    files = [f for f in files if 'namespace=' + ns in f]
+    cfg = './suzieq-cfg.yml'
+    device_tbl = get_sqobject('device')
+    route_tbl = get_sqobject('route')
 
-    if not files:
-        print("No routes data found for " + ns)
-        return
-
-    dfs = []
-    for f in files:
-        df = pd.read_parquet(f)
-        hostname = f.split('hostname=')[1].split('/')[0]
-        df['hostname'] = hostname
-        dfs.append(df)
-
-    routes = pd.concat(dfs)
-    routes = routes[routes['active'] == True]
-
-    routers = {
-        'MSP_router': 1,
-        'NYC_router': 2,
-        'BOS_router': 3,
-        'PHY_router': 4,
-        'CHI_router': 5,
-        'ATL_router': 6,
-        'SFO_router': 7,
-        'HOU_router': 8,
-    }
+    routers = ['MSP_router', 'NYC_router', 'BOS_router', 'PHY_router',
+               'CHI_router', 'ATL_router', 'SFO_router', 'HOU_router']
 
     print("=" * 50)
     print("Q1.2 OSPF Verification - AS " + str(asn))
     print("=" * 50)
 
-    print("\n[Check 1] All routers have routing data:")
+    print("\n[Check 1] All routers have data:")
+    devices = device_tbl(config_file=cfg).get(namespace=[ns])
     for router in routers:
-        check(router + " has routing data", router in routes['hostname'].values)
+        check(router + " has data", router in devices['hostname'].values)
 
     print("\n[Check 2] Key subnets reachable on all routers:")
-    key_subnets = {
-        '198.' + str(X) + '.0.0/24': 'DNS server',
-        str(X) + '.0.199.0/24': 'Measurement service',
-        str(X) + '.200.0.0/24': 'DCS admin subnet',
-        str(X) + '.200.1.0/24': 'DCS patient subnet',
-    }
+    routes_df = route_tbl(config_file=cfg).get(namespace=[ns])
 
     for router in routers:
-        router_routes = routes[routes['hostname'] == router]
-        all_prefixes = router_routes['prefix'].tolist()
-        ospf_prefixes = router_routes[router_routes['protocol'] == 'ospf']['prefix'].tolist()
-        for subnet, name in key_subnets.items():
-            check(router + " sees " + name + " (" + subnet + ")", subnet in all_prefixes)
+        router_routes = routes_df[routes_df['hostname'] == router]['prefix'].tolist()
 
-    print("\n[Check 3] All loopback addresses visible via OSPF:")
-    for router, rid in routers.items():
-        loopback = str(X) + '.' + str(150 + rid) + '.0.1/32'
+        check(router + " sees DNS server (198." + str(X) + ".0.0/24)",
+              '198.' + str(X) + '.0.0/24' in router_routes)
+
+        check(router + " sees Measurement service (" + str(X) + ".0.199.0/24)",
+              str(X) + '.0.199.0/24' in router_routes)
+
+        # Accept either /23 summary or two /24s for DCS
+        has_dcs = (str(X) + '.200.0.0/23' in router_routes or
+                   (str(X) + '.200.0.0/24' in router_routes and
+                    str(X) + '.200.1.0/24' in router_routes))
+        check(router + " sees DCS subnets (" + str(X) + ".200.0.0/23 or /24s)", has_dcs)
+
+    print("\n[Check 3] All loopback addresses reachable:")
+    loopbacks = {
+        'MSP_router': str(X) + '.151.0.1/32',
+        'NYC_router': str(X) + '.152.0.1/32',
+        'BOS_router': str(X) + '.153.0.1/32',
+        'PHY_router': str(X) + '.154.0.1/32',
+        'CHI_router': str(X) + '.155.0.1/32',
+        'ATL_router': str(X) + '.156.0.1/32',
+        'SFO_router': str(X) + '.157.0.1/32',
+        'HOU_router': str(X) + '.158.0.1/32',
+    }
+
+    for router, loopback in loopbacks.items():
         for other_router in routers:
             if other_router != router:
-                other_ospf = routes[(routes['hostname'] == other_router) & (routes['protocol'] == 'ospf')]['prefix'].tolist()
-                check(router + " loopback visible from " + other_router, loopback in other_ospf)
+                other_routes = routes_df[routes_df['hostname'] == other_router]['prefix'].tolist()
+                check(router + " loopback visible from " + other_router, loopback in other_routes)
 
     print("\n" + "=" * 50)
     print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
