@@ -3,7 +3,8 @@ from suzieq.sqobjects import get_sqobject
 
 # this script checks q1.2, ospf network-wide
 # it makes sure every router has data, can see the important shared subnets,
-# and can see every other router's loopback address
+# can see every other router's host subnet, and can see every other
+# router's loopback address
 
 def check_q1_2(asn):
     # turn the group number into suzieq's namespace format, like 3 becomes as-03
@@ -35,6 +36,19 @@ def check_q1_2(asn):
     # all 8 routers we expect to exist in every group's network
     routers = ['MSP_router', 'NYC_router', 'BOS_router', 'PHY_router',
                'CHI_router', 'ATL_router', 'SFO_router', 'HOU_router']
+
+    # router ids per the assignment spec, used for both loopback and
+    # host subnet numbering
+    router_ids = {
+        'MSP_router': 1,
+        'NYC_router': 2,
+        'BOS_router': 3,
+        'PHY_router': 4,
+        'CHI_router': 5,
+        'ATL_router': 6,
+        'SFO_router': 7,
+        'HOU_router': 8,
+    }
 
     print("=" * 50)
     print("Q1.2 OSPF Verification - AS " + str(asn))
@@ -73,7 +87,20 @@ def check_q1_2(asn):
                     str(X) + '.200.1.0/24' in router_routes))
         check(router + " sees DCS subnets (" + str(X) + ".200.0.0/23 or /24s)", has_dcs)
 
-    print("\n[Check 3] All loopback addresses reachable:")
+    print("\n[Check 3] Router-to-host subnets reachable from all other routers:")
+
+    # each router has its own directly connected host, on subnet
+    # x.[100+y].0.0/24 where y is that router's id, per the assignment spec
+    # this needs to be in ospf too, so every other router should see it
+    for router, rid in router_ids.items():
+        host_subnet = str(X) + '.' + str(100 + rid) + '.0.0/24'
+        for other_router in routers:
+            if other_router != router:
+                other_routes = routes_df[routes_df['hostname'] == other_router]['prefix'].tolist()
+                check(router + "'s host subnet (" + host_subnet + ") visible from " + other_router,
+                      host_subnet in other_routes)
+
+    print("\n[Check 4] All loopback addresses reachable:")
 
     # loopback numbering comes straight from the assignment spec
     # router id y gets loopback x.[150+y].0.1, msp is id 1, nyc is id 2, and so on
@@ -90,7 +117,6 @@ def check_q1_2(asn):
 
     # for every router's loopback, check that every other router can see it
     # this is the real proof that ospf is fully converged network-wide
-    # 8 loopbacks times 7 other routers each means 56 checks just from this loop
     for router, loopback in loopbacks.items():
         for other_router in routers:
             if other_router != router:
