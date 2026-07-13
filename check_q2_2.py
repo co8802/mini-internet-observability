@@ -4,24 +4,26 @@ import ipaddress
 from suzieq.sqobjects import get_sqobject
 
 # this script checks q2.2, ebgp sessions with neighboring ases
-# unlike q2.1, this cant be checked by looking at one group alone, since
-# the session depends on both sides being configured correctly
-# so instead of pulling just one namespace, we pull every ases bgp table
-# at once and match each session with its mirror on the other side
+#
+# check 1: our side of each session is established
+# check 2: the neighbor's side agrees, cross-checked directly from their data
+#
+# check 3 (prefix advertisement) is informational only, not pass/fail.
+# spec says only your own /8 should be advertised, but kostas pointed out
+# that some leaking is expected depending on business relationship (e.g.
+# group3/group4 are peers, so forwarding customer routes to each other is
+# expected under gao-rexford). still waiting on a final answer on how this
+# should be scored, real grade sheet shows full marks for everyone despite
+# every group currently leaking on at least one session
+#
+# next-hop-self is not implemented, suzieq's nhSelf column is confirmed
+# broken (returns False even when next-hop-self is genuinely configured
+# per show running-config), would need ssh + config parsing instead
 
-# known student-managed groups, sessions to anyone outside this list are
-# ta-managed infrastructure or ixps, and shouldnt be graded the same way
-# since a student cant control the other side of that link
-# note: this list should probably come from kostas eventually, since he'd
-# know the actual full roster of active student groups this semester
 STUDENT_GROUPS = [3, 4, 5, 6]
 
 
 def repoll_all_groups():
-    # bgp state can go stale fast, we already got burned once by a check
-    # failing just because the last poll happened before a session came up
-    # so we always repoll every known student group right before checking
-    # instead of trusting whatever's already sitting in suzieq
     print("Repolling all student groups before checking, this may take a moment...")
     for g in STUDENT_GROUPS:
         gs = "{:02d}".format(g)
@@ -61,20 +63,12 @@ def check_q2_2(asn):
     print("Q2.2 eBGP Sessions - AS " + str(asn))
     print("=" * 50)
 
-    # always get fresh data before checking, stale bgp state is exactly
-    # what caused a false failure before
     repoll_all_groups()
 
-    # pull every ases bgp data at once, no namespace filter, this is the
-    # "build a table for all ases together" approach
     df = bgp_tbl(config_file=cfg).get()
 
-    # our own external sessions, peerAsn different from our own asn means
-    # its an ebgp session to someone outside our own network
     ours = df[(df['namespace'] == ns) & (df['peerAsn'] != asn)]
 
-    # split into sessions to other student groups vs everything else
-    # (ta-managed ases, ixps, or other infrastructure we cant grade fairly)
     student_sessions = ours[ours['peerAsn'].isin(STUDENT_GROUPS)]
     other_sessions = ours[~ours['peerAsn'].isin(STUDENT_GROUPS)]
 
@@ -97,8 +91,6 @@ def check_q2_2(asn):
         their_asn = row['peerAsn']
         their_ns = "as-{:02d}".format(their_asn)
 
-        # find the mirror row, someone in the neighbor as whose peer ip
-        # is on the same subnet as our own interface (same /24, opposite ip)
         try:
             our_net = ipaddress.IPv4Interface(our_ip + '/24').network
         except:
@@ -122,6 +114,20 @@ def check_q2_2(asn):
             check(label + ": neighbor's side is also Established",
                   mirror['state'] == 'Established')
 
+    print("\n[Info] Prefix advertisement per session (not pass/fail, still waiting on kostas):")
+    for _, row in student_sessions.iterrows():
+        label = row['hostname'] + " -> AS" + str(row['peerAsn'])
+        pfx_tx = row.get('pfxTx', None)
+        if pfx_tx == 1:
+            print("  " + label + ": sent 1 prefix, own /8 only, looks correct")
+        else:
+            print("  " + label + ": sent " + str(pfx_tx) +
+                  " prefixes, may be expected depending on business relationship, unconfirmed")
+
+    print("\n[Info] next-hop-self (not implemented yet):")
+    print("  suzieq's nhSelf column is confirmed broken for this deployment.")
+    print("  would need ssh + show running-config parsing per router instead.")
+
     if skipped:
         print("\n[Info] Sessions skipped as non-student infrastructure:")
         for s in skipped:
@@ -130,7 +136,7 @@ def check_q2_2(asn):
     print("\n" + "=" * 50)
     print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
     if failed == 0:
-        print("Q2.2 PASSED")
+        print("Q2.2 PASSED (session-state checks only, see info sections above)")
     else:
         print("Q2.2 FAILED - failed checks:")
         for r in results:
