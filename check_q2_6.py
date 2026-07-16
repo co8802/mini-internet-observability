@@ -26,7 +26,6 @@ def get_router_config(group, router_id):
     # router ip pattern confirmed earlier from goto.sh: 158.X.(9+routerID).1
     router_ip = "158." + str(group) + "." + str(9 + router_id) + ".1"
     proxy_port = str(2000 + group)
-
     # ssh into the group proxy first, then from there pipe the command
     # into vtysh on the actual router. doing it this way avoids the
     # quoting mess we ran into trying vtysh -c through a nested ssh

@@ -2,23 +2,6 @@ import sys
 import subprocess
 import re
 
-# this script checks q2.3, local-pref and business relationship policies
-#
-# rewritten to stop using suzieq's ingressRmap/egressRmap columns, since we
-# found direct proof those are unreliable. suzieq said group 3's ixp
-# session had no egress route map at all, but a direct ssh+grep on the
-# real router config showed a real route map that was genuinely applied
-# and genuinely uses communities. same category of problem as the
-# confirmed broken nhSelf column. so this version reads the actual config
-# straight off each router instead of trusting suzieq for this
-#
-# checks route map presence (ingress and egress) on every external ebgp
-# session, same tier as before, still cannot verify actual local-pref
-# values or whether the business relationship ranking (customer > peer >
-# provider) is correct, that would need per-session relationship data we
-# dont have yet plus parsing show ip bgp neighbor advertised-routes for
-# the real localpref numbers
-
 ROUTERS = {
     'MSP_router': 1,
     'NYC_router': 2,
@@ -43,7 +26,24 @@ def get_router_config(group, router_id):
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
         return result.stdout
-    except Exception as e:
+    except Exception:
+        return None
+
+
+def get_advertised_routes(group, router_id, peer_ip):
+    router_ip = "158." + str(group) + "." + str(9 + router_id) + ".1"
+    proxy_port = str(2000 + group)
+    command = "show ip bgp neighbor " + peer_ip + " advertised-routes"
+    cmd = (
+        "ssh -p " + proxy_port +
+        " -i ~/suzieq/keys/master/id_rsa -o StrictHostKeyChecking=no root@localhost "
+        "\"echo '" + command + "' | ssh -o StrictHostKeyChecking=no root@" +
+        router_ip + " vtysh\""
+    )
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        return result.stdout
+    except Exception:
         return None
 
 
@@ -61,6 +61,87 @@ def get_route_map_name(config_text, peer_ip, direction):
 
 def route_map_exists(config_text, route_map_name):
     return bool(re.search(r'route-map ' + re.escape(route_map_name) + r' (?:permit|deny) \d+', config_text))
+
+
+def parse_route_map_entries(config_text, route_map_name):
+    entries = re.findall(
+        r'route-map ' + re.escape(route_map_name) + r' (permit|deny) (\d+)\n(.*?)(?=\nroute-map |\n!|\Z)',
+        config_text, re.DOTALL
+    )
+    return sorted(entries, key=lambda e: int(e[1]))
+
+
+def has_real_filtering(entries):
+    for action, seq, body in entries:
+        if 'match' in body:
+            return True
+    return False
+
+
+def find_own_prefix_lists(config_text, own_asn):
+    own_net = str(own_asn) + '.0.0.0/8'
+    matches = re.findall(r'ip prefix-list (\S+) seq \d+ permit ' + re.escape(own_net), config_text)
+    return set(matches)
+
+
+def find_origin_community(config_text, own_prefix_list_names):
+    for pl_name in own_prefix_list_names:
+        pattern = r'route-map \S+ permit \d+\n(?:.*\n)*?\s*match ip address prefix-list ' + re.escape(pl_name) + r'\n(?:.*\n)*?\s*set community (\S+)'
+        match = re.search(pattern, config_text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def find_community_lists_containing(config_text, community_value):
+    lists = re.findall(r'bgp community-list (\d+) seq \d+ permit (\S+)', config_text)
+    matching_numbers = set()
+    for list_num, comm_val in lists:
+        if comm_val == community_value:
+            matching_numbers.add(list_num)
+    return matching_numbers
+
+
+def own_prefix_permitted(config_text, entries, own_asn):
+    if not entries:
+        return False
+
+    own_prefix_lists = find_own_prefix_lists(config_text, own_asn)
+    origin_community = find_origin_community(config_text, own_prefix_lists) if own_prefix_lists else None
+    matching_community_lists = (
+        find_community_lists_containing(config_text, origin_community)
+        if origin_community else set()
+    )
+
+    own_prefix_seq = None
+    for action, seq, body in entries:
+        if action != 'permit':
+            continue
+        if any(pl in body for pl in own_prefix_lists):
+            own_prefix_seq = int(seq)
+            break
+        matched_list_nums = re.findall(r'match community (\S+)', body)
+        if any(num in matching_community_lists for num in matched_list_nums):
+            own_prefix_seq = int(seq)
+            break
+
+    if own_prefix_seq is None:
+        return False
+
+    for action, seq, body in entries:
+        if int(seq) >= own_prefix_seq:
+            break
+        if action == 'deny' and 'match' not in body:
+            return False
+
+    return True
+
+
+def check_localpref_used(advertised_output):
+    locprefs = re.findall(r'^\s*\*>?\s*\S+\s+\S+\s+\d*\s+(\d+)', advertised_output, re.MULTILINE)
+    if not locprefs:
+        return None
+    return any(lp != '100' for lp in locprefs)
 
 
 def check_q2_3(asn):
@@ -111,19 +192,52 @@ def check_q2_3(asn):
                 print("  FAIL: " + label_out)
             check(label_out, out_exists)
 
-    print("\n[Info] Local-pref values still not verified:")
-    print("  this checks route map presence only. verifying the actual")
-    print("  local-pref numbers, and whether they correctly rank customer")
-    print("  over peer over provider, still needs per-session business")
-    print("  relationship data we dont have yet, plus parsing localpref")
-    print("  out of show ip bgp neighbor advertised-routes per session.")
+            out_entries = parse_route_map_entries(config, out_rmap) if out_exists else []
+
+            if out_exists:
+                real_filtering = has_real_filtering(out_entries)
+                label_filter = label_base + " egress route map has real filtering logic (at least one match clause)"
+                if real_filtering:
+                    print("  PASS: " + label_filter)
+                else:
+                    print("  FAIL: " + label_filter + " (unconditional permit, no actual export policy)")
+                check(label_filter, real_filtering)
+
+            if out_exists:
+                permitted = own_prefix_permitted(config, out_entries, asn)
+                label_permit = label_base + " own prefix is genuinely permitted through egress"
+                if permitted:
+                    print("  PASS: " + label_permit)
+                else:
+                    print("  FAIL: " + label_permit)
+                check(label_permit, permitted)
+
+            advertised = get_advertised_routes(asn, router_id, peer_ip)
+            if advertised:
+                lp_used = check_localpref_used(advertised)
+                if lp_used is None:
+                    print("  INFO: " + label_base + " no routes advertised yet, cant check local-pref")
+                else:
+                    label_lp = label_base + " local-pref differs from FRR default (mechanism check only)"
+                    if lp_used:
+                        print("  PASS: " + label_lp)
+                    else:
+                        print("  FAIL: " + label_lp)
+                    check(label_lp, lp_used)
+
+    print("\n[Info] Still not verified, needs data we dont have yet:")
+    print("  whether the local-pref ranking actually matches customer >")
+    print("  peer > provider correctly for each specific session, and")
+    print("  whether ixp sessions are specifically treated as peer-to-peer.")
+    print("  both need per-session business relationship data from kostas")
+    print("  or the connections page before they can be checked properly.")
 
     print("\n" + "=" * 50)
     print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
     if failed == 0:
-        print("Q2.3 route map presence check PASSED (local-pref not verified)")
+        print("Q2.3 check PASSED (relationship-specific ranking not verified)")
     else:
-        print("Q2.3 route map presence check FAILED - missing on:")
+        print("Q2.3 check FAILED - missing on:")
         for f in fail_details:
             print("  " + f)
     print("=" * 50)

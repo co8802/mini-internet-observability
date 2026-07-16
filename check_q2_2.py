@@ -1,26 +1,21 @@
 import sys
 import subprocess
 import ipaddress
+import re
 from suzieq.sqobjects import get_sqobject
 
-# this script checks q2.2, ebgp sessions with neighboring ases
-#
-# check 1: our side of each session is established
-# check 2: the neighbor's side agrees, cross-checked directly from their data
-#
-# check 3 (prefix advertisement) is informational only, not pass/fail.
-# spec says only your own /8 should be advertised, but kostas pointed out
-# that some leaking is expected depending on business relationship (e.g.
-# group3/group4 are peers, so forwarding customer routes to each other is
-# expected under gao-rexford). still waiting on a final answer on how this
-# should be scored, real grade sheet shows full marks for everyone despite
-# every group currently leaking on at least one session
-#
-# next-hop-self is not implemented, suzieq's nhSelf column is confirmed
-# broken (returns False even when next-hop-self is genuinely configured
-# per show running-config), would need ssh + config parsing instead
-
 STUDENT_GROUPS = [3, 4, 5, 6]
+
+ROUTERS = {
+    'MSP_router': 1,
+    'NYC_router': 2,
+    'BOS_router': 3,
+    'PHY_router': 4,
+    'CHI_router': 5,
+    'ATL_router': 6,
+    'SFO_router': 7,
+    'HOU_router': 8,
+}
 
 
 def repoll_all_groups():
@@ -36,6 +31,31 @@ def repoll_all_groups():
         except Exception as e:
             print("  Warning: repoll failed for group " + str(g) + ": " + str(e))
     print("Done repolling.\n")
+
+
+def get_router_config(group, router_id):
+    router_ip = "158." + str(group) + "." + str(9 + router_id) + ".1"
+    proxy_port = str(2000 + group)
+    cmd = (
+        "ssh -p " + proxy_port +
+        " -i ~/suzieq/keys/master/id_rsa -o StrictHostKeyChecking=no root@localhost "
+        "\"echo 'show running-config' | ssh -o StrictHostKeyChecking=no root@" +
+        router_ip + " vtysh\""
+    )
+    try:
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        return result.stdout
+    except Exception:
+        return None
+
+
+def find_stray_ospf_networks(config_text):
+    ospf_block_match = re.search(r'router ospf.*?(?=\nrouter |\n!\nip |\Z)', config_text, re.DOTALL)
+    if not ospf_block_match:
+        return []
+    ospf_block = ospf_block_match.group(0)
+    stray = re.findall(r'network (179\.\S+|180\.\S+)', ospf_block)
+    return stray
 
 
 def check_q2_2(asn):
@@ -114,6 +134,18 @@ def check_q2_2(asn):
             check(label + ": neighbor's side is also Established",
                   mirror['state'] == 'Established')
 
+    print("\n[Check 3] No 179./180. subnets leaking into OSPF:")
+    for router_name, router_id in ROUTERS.items():
+        config = get_router_config(asn, router_id)
+        if config is None:
+            check(router_name + " OSPF config could be checked", False)
+            continue
+        stray = find_stray_ospf_networks(config)
+        label = router_name + " has no 179./180. subnets in OSPF"
+        if stray:
+            label += " (found: " + str(stray) + ")"
+        check(label, len(stray) == 0)
+
     print("\n[Info] Prefix advertisement per session (not pass/fail, still waiting on kostas):")
     for _, row in student_sessions.iterrows():
         label = row['hostname'] + " -> AS" + str(row['peerAsn'])
@@ -124,9 +156,9 @@ def check_q2_2(asn):
             print("  " + label + ": sent " + str(pfx_tx) +
                   " prefixes, may be expected depending on business relationship, unconfirmed")
 
-    print("\n[Info] next-hop-self (not implemented yet):")
-    print("  suzieq's nhSelf column is confirmed broken for this deployment.")
-    print("  would need ssh + show running-config parsing per router instead.")
+    print("\n[Info] next-hop-self on eBGP sessions is checked separately:")
+    print("  see check_q2_2_nexthop.py for that, kept in its own file since")
+    print("  its explicitly called out as a tip rather than a hard rule.")
 
     if skipped:
         print("\n[Info] Sessions skipped as non-student infrastructure:")
@@ -136,7 +168,7 @@ def check_q2_2(asn):
     print("\n" + "=" * 50)
     print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
     if failed == 0:
-        print("Q2.2 PASSED (session-state checks only, see info sections above)")
+        print("Q2.2 PASSED")
     else:
         print("Q2.2 FAILED - failed checks:")
         for r in results:

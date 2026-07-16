@@ -1,4 +1,5 @@
 import sys
+import ipaddress
 from suzieq.sqobjects import get_sqobject
 
 # this script checks q1.2, ospf network-wide
@@ -67,6 +68,27 @@ def check_q1_2(asn):
     # pull the whole routing table once, then filter per router as we go
     routes_df = route_tbl(config_file=cfg).get(namespace=[ns])
 
+    # dcs subnets can be split any way a group chooses, kostas pointed out
+    # its not just a /23 whole or two /24 halves, could be a /25 split or
+    # anything else, as long as the pieces together cover the full /23.
+    # this builds the expected block once and checks real subnet coverage
+    # instead of hardcoding specific subnet sizes
+    dcs_block = ipaddress.IPv4Network(str(X) + '.200.0.0/23')
+
+    def dcs_block_fully_covered(prefix_list):
+        covering_nets = []
+        for p in prefix_list:
+            try:
+                net = ipaddress.IPv4Network(p)
+            except ValueError:
+                continue
+            if net.subnet_of(dcs_block) or net == dcs_block:
+                covering_nets.append(net)
+        if not covering_nets:
+            return False
+        collapsed = list(ipaddress.collapse_addresses(covering_nets))
+        return collapsed == [dcs_block]
+
     for router in routers:
         # grab just this router's list of known prefixes as plain strings
         router_routes = routes_df[routes_df['hostname'] == router]['prefix'].tolist()
@@ -79,13 +101,11 @@ def check_q1_2(asn):
         check(router + " sees Measurement service (" + str(X) + ".0.199.0/24)",
               str(X) + '.0.199.0/24' in router_routes)
 
-        # dcs subnets can be advertised two ways depending on how the group split it
-        # either as one combined /23 block, or as two separate /24 halves
-        # the assignment only guarantees the combined /23, so we accept both forms
-        has_dcs = (str(X) + '.200.0.0/23' in router_routes or
-                   (str(X) + '.200.0.0/24' in router_routes and
-                    str(X) + '.200.1.0/24' in router_routes))
-        check(router + " sees DCS subnets (" + str(X) + ".200.0.0/23 or /24s)", has_dcs)
+        # dcs subnets can be advertised any way the group chooses, so we
+        # check that the actual coverage adds up to the full /23 instead
+        # of assuming one specific split pattern
+        has_dcs = dcs_block_fully_covered(router_routes)
+        check(router + " sees full DCS coverage (" + str(X) + ".200.0.0/23, any valid split)", has_dcs)
 
     print("\n[Check 3] Router-to-host subnets reachable from all other routers:")
 
