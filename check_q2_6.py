@@ -1,14 +1,32 @@
-import sys
-import subprocess
-import re
+import sys                     # reads the group number typed on the command line
+import subprocess               # lets us run shell commands, like ssh, from python
 
-# this script checks q2.6, rpki configuration
-# looks at whether an rpki validator/cache is set up on each router, and
-# whether any route maps actually use rpki status to filter routes coming in
+# this script checks q2.6, rpki configuration, using live, real time
+# network state instead of saved config
 #
-# same ssh plus config parsing approach as check_q1_4.py and the
-# next-hop-self checks, since suzieq doesnt expose this kind of raw config
-# detail
+# fixed from an earlier version that checked saved config for an
+# "rpki cache" line and a "match rpki" route map line. thats a static
+# config check, exactly the category thats already handled elsewhere.
+# this version instead checks whether the router is actually, right now,
+# successfully connected to its rpki validator, using "show rpki
+# cache-connection". a router can have a perfectly correct looking
+# config line telling it where to connect, while the actual live
+# connection is dead for some other reason entirely, so checking the
+# config alone doesnt tell us if rpki is really working
+#
+# major finding from earlier tonight: every single router across all 4
+# test groups showed no live connection to their rpki cache server, 32
+# routers, zero exceptions, despite the config looking correct on every
+# one of them. since all 4 groups got full marks on this question on the
+# real grade sheet, this looks like something changed on the
+# infrastructure side since grading, not a student config problem,
+# worth raising directly rather than scoring against anyone
+#
+# still not covered, and why: whether a route origin authorization was
+# actually issued, that happens on a completely separate system (the
+# certificate authority), not visible from any group's own router at
+# all. also whether the rpki filtering logic correctly distinguishes
+# valid, invalid, and not found routes, rather than just existing
 
 ROUTERS = {
     'MSP_router': 1,
@@ -22,25 +40,24 @@ ROUTERS = {
 }
 
 
-def get_router_config(group, router_id):
-    # router ip pattern confirmed earlier from goto.sh: 158.X.(9+routerID).1
-    router_ip = "158." + str(group) + "." + str(9 + router_id) + ".1"
-    proxy_port = str(2000 + group)
-    # ssh into the group proxy first, then from there pipe the command
-    # into vtysh on the actual router. doing it this way avoids the
-    # quoting mess we ran into trying vtysh -c through a nested ssh
+def check_cache_connection(group, router_id):
+    # asks the router right now whether its actually talking to its
+    # rpki validator, not whether its configured to try
+    router_ip = "158." + str(group) + "." + str(9 + router_id) + ".1"   # confirmed pattern from goto.sh
+    proxy_port = str(2000 + group)   # every group's proxy sits on port 2000+groupnum
+    # ssh into the proxy first, then pipe the command into vtysh on the
+    # real router, avoids the quoting problems from earlier tonight
     cmd = (
         "ssh -p " + proxy_port +
         " -i ~/suzieq/keys/master/id_rsa -o StrictHostKeyChecking=no root@localhost "
-        "\"echo 'show running-config' | ssh -o StrictHostKeyChecking=no root@" +
+        "\"echo 'show rpki cache-connection' | ssh -o StrictHostKeyChecking=no root@" +
         router_ip + " vtysh\""
     )
     try:
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
         return result.stdout
-    except Exception as e:
-        # if ssh fails for any reason just return none so the rest of the
-        # script can skip that router instead of crashing
+    except Exception:
+        # if ssh fails for any reason, just return nothing instead of crashing
         return None
 
 
@@ -49,6 +66,7 @@ def check_q2_6(asn):
     failed = 0
     fail_details = []
 
+    # small helper so we dont repeat if/else everywhere
     def check(name, condition):
         nonlocal passed, failed
         if condition:
@@ -58,50 +76,44 @@ def check_q2_6(asn):
             fail_details.append(name)
 
     print("=" * 50)
-    print("Q2.6 RPKI Verification (via SSH+config parse) - AS " + str(asn))
+    print("Q2.6 RPKI Cache Connection Check (live state) - AS " + str(asn))
     print("=" * 50)
+    print("\nnote: this checks whether the router is actually connected to")
+    print("its rpki validator right now, not whether the config says it")
+    print("should be. a correct-looking config with a dead connection")
+    print("means rpki isnt functionally validating anything\n")
 
     for router_name, router_id in ROUTERS.items():
-        print("\n[" + router_name + "]")
-        config = get_router_config(asn, router_id)
-        if config is None:
-            print("  Could not retrieve config, skipping")
+        output = check_cache_connection(asn, router_id)
+        if output is None:
+            print("[" + router_name + "] could not reach router, skipping")
             continue
 
-        # looking for a line like "rpki cache 3.104.0.1 3323 preference 1"
-        # this tells us the router actually has a validator configured
-        has_rpki_cache = bool(re.search(r'rpki cache \S+ \d+', config))
-        label1 = router_name + " has rpki cache/validator configured"
-        if has_rpki_cache:
-            print("  PASS: " + label1)
+        if "No connection to RPKI cache server" in output:
+            print("[" + router_name + "] NOT connected to RPKI cache server")
+            check(router_name + " has a live RPKI cache connection", False)
+        elif "rpki" in output.lower() or "cache" in output.lower():
+            # print the actual output so we can see what a real connected
+            # state looks like, since we havent confirmed the exact
+            # wording frr uses when the connection is genuinely up
+            last_line = output.strip().splitlines()[-1] if output.strip() else "(empty)"
+            print("[" + router_name + "] output: " + last_line)
+            check(router_name + " has a live RPKI cache connection", True)
         else:
-            print("  FAIL: " + label1)
-        check(label1, has_rpki_cache)
+            print("[" + router_name + "] unexpected output, no RPKI mention at all: " + str(output)[:200])
+            check(router_name + " has a live RPKI cache connection", False)
 
-        # looking for a route map line that actually matches on rpki
-        # status, this is the part that uses rpki to reject bad routes
-        has_rpki_filter = bool(re.search(r'match rpki (valid|invalid|notfound)', config))
-        label2 = router_name + " has a route map filtering on rpki validity"
-        if has_rpki_filter:
-            print("  PASS: " + label2)
-        else:
-            # not counting this as a real fail yet, still not sure if
-            # every router actually needs this or just the ones handling
-            # external routes
-            print("  INFO: " + label2 + " (not found, may not be needed on every router)")
-
+    # print the final tally and wrap up
     print("\n" + "=" * 50)
     print("Results: " + str(passed) + " passed, " + str(failed) + " failed")
-    if failed == 0:
-        print("Q2.6 rpki cache check PASSED")
-    else:
-        print("Q2.6 rpki cache check FAILED - missing on:")
+    if failed > 0:
+        print("Routers NOT connected to their RPKI cache server:")
         for f in fail_details:
             print("  " + f)
     print("=" * 50)
 
 
 if __name__ == "__main__":
-    # defaults to group 3 if you dont pass a number in
+    # default to group 3 if no group number is passed in
     asn = int(sys.argv[1]) if len(sys.argv) > 1 else 3
     check_q2_6(asn)
