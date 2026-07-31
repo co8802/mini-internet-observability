@@ -1,12 +1,11 @@
 #!/bin/bash
-# Enables automatic tlog recording at login on every proxy container.
-# Genuinely self-contained: unpacks from a bundled tarball (bundles/tlog_bundle.tar)
-# rather than live-copying from any already-configured container.
+# enables automatic tlog recording at login on every proxy container.
+# genuinely self-contained: unpacks from a bundled tarball (bundles/tlog_bundle.tar)
+# rather than live-copying from any already-configured container
 
 LOGFILE=~/tlog_deploy_rollback.log
 MODE="${1:-check}"
 BUNDLE="$HOME/mini-internet-observability/bundles/tlog_bundle.tar"
-
 TARGETS=$(sudo docker ps --format "{{.Names}}" | grep -E "^[0-9]+_ssh$")
 
 install_tlog_from_bundle() {
@@ -54,7 +53,6 @@ for c in $TARGETS; do
         sudo docker exec "$c" sh -c "grep -qxF '/usr/bin/tlog-rec-session' /etc/shells || echo '/usr/bin/tlog-rec-session' >> /etc/shells"
         sudo docker exec "$c" sed -i -e 's|// "shell" : "/bin/bash",|"shell" : "/bin/bash",|' -e 's|// "path" : ""|"path" : "/var/log/tlog/session.log"|' -e 's|// "writer" : "syslog"|"writer" : "syslog"|' /etc/tlog/tlog-rec-session.conf
         sudo docker exec "$c" sh -c "awk -F: 'BEGIN{OFS=\":\"} \$1==\"root\"{\$7=\"/usr/bin/tlog-rec-session\"} {print}' /etc/passwd > /etc/passwd.tmp && mv /etc/passwd.tmp /etc/passwd"
-
         NEW_SHELL=$(sudo docker exec "$c" sh -c "grep '^root:' /etc/passwd | cut -d: -f7")
         if [ "$NEW_SHELL" == "/usr/bin/tlog-rec-session" ]; then
             echo "[$c] APPLIED"
