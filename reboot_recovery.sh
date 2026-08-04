@@ -50,4 +50,7 @@ echo "=== Step 5: Re-deploying TA fallback accounts to all containers ==="
 # same idea again - safe to re-run
 ~/ta_account_deploy.sh apply
 
+echo "=== Step 6: Re-checking centralized connector on all proxies ==="
+~/setup_centralized_connector.sh apply
+
 echo "=== Recovery complete ==="
